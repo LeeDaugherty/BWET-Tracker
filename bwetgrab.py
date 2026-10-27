@@ -404,7 +404,10 @@ def complete_production_bwet_system():
                 msg["To"] = target_boost_phone
                 msg["Subject"] = "BWET"
                 
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                with smtplib.SMTP(host="smtp.gmail.com", port=587, timeout=10) as server:
+                    server.ehlo() #Force handshake
+                    server.starttls() #Upgrade to secure
+                    server.ehlo() #Re-handshake
                     server.login(sender_email, sender_password)
                     server.sendmail(sender_email, [target_boost_phone], msg.as_string())
                 print("📱 Boost Mobile SMS text pushed successfully.")
@@ -442,42 +445,52 @@ if __name__ == "__main__":
         sys.exit(0)
 
     print("🚀 BWET 7-Day Extended Hours Monitoring Daemon Initialized.")
-    data_captured_today = False
+    morning_captured_today = False
+    afternoon_captured_today = False
     last_checked_day = None
 
     while True:
         now = datetime.datetime.now()
         current_day = now.date()
         
-        # Clear daily trackers upon day boundary rollover
+        # Reset daily trackers upon crossing the midnight boundary
         if current_day != last_checked_day:
-            data_captured_today = False
+            morning_captured_today = False
+            afternoon_captured_today = False
             last_checked_day = current_day
 
+        # Morning Window: 07:00 CST to 08:30 CST
         is_pre_market = (7 <= now.hour <= 8 and not (now.hour == 8 and now.minute > 30))
-        is_after_hours = (15 <= now.hour <= 16 and not (now.hour == 15 and now.minute < 30))
+        
+        # Afternoon Window: EXACTLY 15:30 CST to 16:00 CST (3:30 PM - 4:00 PM)
+        is_after_hours = (now.hour == 15 and now.minute >= 30)
 
         if is_pre_market or is_after_hours:
-            # Silent holding gate if we have successfully completed our morning tracking goals
-            if data_captured_today and is_pre_market:
-                time.sleep(600)
+            # Silent holding gate if morning target was already achieved
+            if is_pre_market and morning_captured_today:
+                time.sleep(300)
+                continue
+                
+            # Silent holding gate if afternoon target was already achieved
+            if is_after_hours and afternoon_captured_today:
+                time.sleep(300)
                 continue
                 
             print(f"\n⏰ Dynamic Market Window Active ({now.strftime('%H:%M:%S')} CST). Initiating scan cycle...")
             fresh_release_confirmed, status_msg = complete_production_bwet_system()
             
-            # Secure Lockdown State Gate
-            if fresh_release_confirmed and is_pre_market:
+            # Secure Lockdown State Gates per individual tracking window
+            if is_pre_market and fresh_release_confirmed:
                 print("🎯 MORNING LOCKDOWN CONFIRMED: Today's fresh batch captured. Standby until next window...")
-                data_captured_today = True
+                morning_captured_today = True
             
-            # PRODUCTION FIX: Enforce a mandatory 10-minute wait loop out here.
-            # Regardless of whether the scrape succeeded, failed, or data was old, 
-            # the system is forced to pause for 10 minutes before polling the web again.
+            if is_after_hours:
+                print("🎯 AFTER-HOURS CAPTURE CONFIRMED: Tracking pass complete. Locking down window...")
+                afternoon_captured_today = True
+            
             print("⏳ Scan cycle complete. Enforcing 10-minute stabilization delay...")
             time.sleep(600)
             continue
             
-        # Passive sleep state when outside tracking window barriers
+        # Passive deep-sleep state (15 minutes) when outside any active market window barriers
         time.sleep(900)
-
