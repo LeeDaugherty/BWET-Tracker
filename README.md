@@ -41,12 +41,12 @@ Passive Deep-Sleep	Outside Active Hours	Throttles background processing to a 15-
 
 To run a temporary, immediate diagnostic verification scan to test your connection layers, web scrapers, and local directories without entering the looping background state, execute the script with the test flag:
 bash
-python3 /home/ldaugherty/bwetgrab.py --test
+python3 bwetgrab.py --test
 Use code with caution.
 
 For continuous 24/7 autonomous production monitoring, run the script detached as a background process or system service:
 bash
-nohup python3 /home/ldaugherty/bwetgrab.py > ~/bwet_daemon.log 2>&1 &
+nohup python3 bwetgrab.py > bwet_daemon.log 2>&1 &
 Use code with caution.
 
 Enjoy!
