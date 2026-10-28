@@ -184,8 +184,10 @@ def complete_production_bwet_system():
         try:
             ticker_object = yf.Ticker(ticker_symbol)
             options_expirations = ticker_object.options
-            if len(options_expirations) > 0:
-                nearest_expiry = str(options_expirations)
+            
+            # FIX: Ensure options list is not empty and has structural length before indexing
+            if isinstance(options_expirations, (list, tuple)) and len(options_expirations) > 0:
+                nearest_expiry = str(options_expirations[0]) # Adjusted index to extract first actual element string
                 options_chain = ticker_object.option_chain(nearest_expiry)
                 
                 oi_array = options_chain.calls['openInterest'].values.flatten()
@@ -202,11 +204,13 @@ def complete_production_bwet_system():
                     oi_status = f"NORMAL ({live_call_oi:,} Contracts)"
                     oi_meaning = "Options flow matches paper trend. No hidden anomaly."
             else:
+                # NATIVE CONTROL: Graceful exit fallback when yfinance passes an empty list []
                 oi_expansion_ratio = 1.0
                 oi_surge_detected = False
-                oi_status = "No Chains Listed"
-                oi_meaning = "No active options open for this expiration cycle."
-        except Exception:
+                oi_status = "Data Dynamic Base"
+                oi_meaning = "Exchange data normal overlay (Options chain temporarily unavailable)."
+        except Exception as options_error:
+            print(f"⚠️ Live Options Parse Exception: {options_error}")
             oi_expansion_ratio = 1.0
             oi_surge_detected = False
             oi_status = "Data Dynamic Base"
