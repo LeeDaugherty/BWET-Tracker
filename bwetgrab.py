@@ -1,10 +1,15 @@
 import os
+import sys
+import fcntl
 import datetime
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import time
 import re
+import smtplib
+import argparse
+from email.mime.text import MIMEText
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -12,7 +17,33 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from dotenv import load_dotenv
 
-# Load environment tokens from local home configuration
+# --- STEP 1: PARSE ARGUMENTS AT ENTRY POINT ---
+parser = argparse.ArgumentParser(description="BWET Freight Futures Monitoring Daemon")
+parser.add_argument("--test", action="store_true", help="Force an immediate diagnostic evaluation run and exit.")
+args = parser.parse_args()
+
+# --- STEP 2: CONDITIONALLY ENFORCE SINGLETON LOCK ---
+# If --test is passed, this block is completely skipped to bypass the lock file check
+if not args.test:
+    lock_path = os.path.expanduser("~/.bwet_daemon.lock")
+    
+    # Clean up any dead file handles from disk before checking
+    if os.path.exists(lock_path):
+        try:
+            os.remove(lock_path)
+        except Exception:
+            pass
+
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+    except IOError:
+        print("🚨 Duplicate Instance Detected! Another daemon thread is already active. Exiting cleanly.")
+        sys.exit(0)
+
+# Load environment configuration tokens
 env_path = os.path.expanduser("~/bwet.env")
 load_dotenv(dotenv_path=env_path)
 
@@ -23,10 +54,10 @@ def complete_production_bwet_system():
     # Read environment configurations with fallback parameters
     safety_buffer_scale = float(os.getenv("SAFETY_BUFFER_SCALE", 2.5))
     account_cash = float(os.getenv("ACCOUNT_CASH", 5000.00))
-    
-    # --- 1. DOWNLOAD LIVE MARKET DATA ---
-    print("Launching data pipeline infrastructure...")
 
+    print(f"\n🚀 [08:25 AM SCANNERS ACTIVE] Launching synchronized market data pipelines...")
+    
+    #Download live market data arrays 
     # Passing prepost=True captures active after-hours and pre-market prints
     df = yf.download(ticker_symbol, period="6mo", interval="1d", progress=False, prepost=True)
     oil_df = yf.download("BZ=F", period="6mo", interval="1d", progress=False, prepost=True)
@@ -48,25 +79,23 @@ def complete_production_bwet_system():
     brent_5d_change = 0.0
 
     try:
-        # Flatten and clean $BWET technical series arrays
+        # Technical Vector Formatting
         close_series = pd.Series(df['Close'].values.flatten()).dropna()
         high_series = pd.Series(df['High'].values.flatten()).dropna()
         low_series = pd.Series(df['Low'].values.flatten()).dropna()
         volume_series = pd.Series(df['Volume'].values.flatten()).dropna()
         
-        # Flatten and extract Brent Crude Oil macro vectors
         oil_close_series = pd.Series(oil_df['Close'].values.flatten()).dropna()
         brent_current = round(float(oil_close_series.iloc[-1]), 2)
         brent_prev = round(float(oil_close_series.iloc[-2]), 2)
         brent_change = brent_current - brent_prev
         brent_pct = (brent_change / brent_prev) * 100 if brent_prev != 0 else 0.0
 
-        # Array length safety guard
         if len(oil_close_series) >= 5:        
             brent_5d_ago = round(float(oil_close_series.iloc[-5]), 2)
             brent_5d_change = brent_current - brent_5d_ago
-        else:
-            brent_5d_change = 0.0
+#        else:
+#            brent_5d_change = 0.0
         
         # Technical Indicators Math Calculations
         delta = close_series.diff()
@@ -86,7 +115,6 @@ def complete_production_bwet_system():
         momentum14_series = close_series - close_series.shift(14)
         avg_volume_20 = volume_series.rolling(window=20).mean()
         
-        # Scalar assignments
         current_close = round(float(close_series.iloc[-1]), 2)
         current_volume = float(volume_series.iloc[-1])
         current_avg_vol = float(avg_volume_20.iloc[-1])
@@ -96,7 +124,7 @@ def complete_production_bwet_system():
         current_rsi = round(float(rsi_series.iloc[-1]), 1)
         current_vol_ma = round(float(volatility_ma20.iloc[-1]), 2)
         
-        # --- 2. THE PORTFOLIO BASKET MONITOR ---
+        # --- AMPLIFY ETF DATA HOLDINGS WEBSCRAPER LAYER ---
         try:
             url = "https://amplifyetfs.com/bwet-holdings/"
             options = webdriver.ChromeOptions()
@@ -180,7 +208,7 @@ def complete_production_bwet_system():
             if driver is not None:
                 driver.quit()
 
-        # --- 3. LIVE OPTIONS OPEN INTEREST SCRAPER ---
+        # --- OPTIONS OPEN INTEREST SCRAPER ---
         try:
             ticker_object = yf.Ticker(ticker_symbol)
             options_expirations = ticker_object.options
@@ -189,10 +217,8 @@ def complete_production_bwet_system():
             if isinstance(options_expirations, (list, tuple)) and len(options_expirations) > 0:
                 nearest_expiry = str(options_expirations[0]) # Adjusted index to extract first actual element string
                 options_chain = ticker_object.option_chain(nearest_expiry)
-                
                 oi_array = options_chain.calls['openInterest'].values.flatten()
                 live_call_oi = int(np.nan_to_num(oi_array).sum())
-                
                 calculated_baseline_oi = max(int(current_avg_vol * 0.05), 500)
                 oi_expansion_ratio = round(float(live_call_oi / calculated_baseline_oi), 2)
                 oi_surge_detected = oi_expansion_ratio >= 2.0
@@ -202,7 +228,7 @@ def complete_production_bwet_system():
                     oi_meaning = "Stealth leverage spike detected. Coiled spring pressure building."
                 else:
                     oi_status = f"NORMAL ({live_call_oi:,} Contracts)"
-                    oi_meaning = "Options flow matches paper trend. No hidden anomaly."
+                    oi_meaning = "Options flow matches paper trend."
             else:
                 # NATIVE CONTROL: Graceful exit fallback when yfinance passes an empty list []
                 oi_expansion_ratio = 1.0
@@ -216,7 +242,8 @@ def complete_production_bwet_system():
             oi_status = "Data Dynamic Base"
             oi_meaning = "Exchange data normal overlay."
 
-        # --- 4. SAFETY NET MANAGEMENT ---
+
+        # --- SAFETY NET MANAGEMENT ---
         allowed_drop_distance = current_atr * safety_buffer_scale
         
         # Track the peak running price seen over the last 5 days
@@ -245,10 +272,10 @@ def complete_production_bwet_system():
         total_trade_cost = round(float(recommended_shares * current_close), 2)
         
         speed_status = 'Too Hot/Overbought' if current_rsi >= 70 else 'Too Cold/Oversold' if current_rsi <= 30 else 'Healthy/Neutral'
-        buyer_status = 'High (Big players buying)' if current_volume > current_avg_vol else 'Low (Quiet trading)'
+        buyer_status = 'High Institutional' if current_volume > current_avg_vol else 'Low (Quiet trading)'
         vol_regime = 'EXPANDING (High Risk)' if current_atr > current_vol_ma else 'CONTRACTING (Stable Market)'
         
-        # --- 5. ADVANCED MACRO EVALUATION ENGINE ---
+        # --- ADVANCED MACRO EVALUATION ENGINE ---
         csv_file_path = os.path.expanduser("~/trading_ledger.csv")
         send_sms_alert = False
         
@@ -277,24 +304,27 @@ def complete_production_bwet_system():
             alert_icon = "🌋"
             send_sms_alert = True
         elif current_rsi >= 75:
-            action_advice = "⚠️ HARVEST GAINS: Take profit parameters reached."
+            action_advice = "⚠️ HARVEST GAINS: Profit targets reached."
             alert_icon = "⚠️"
         elif current_close > current_ema and current_volume > current_avg_vol:
             action_advice = "🔥 GREEN LIGHT: Trend verified by high institutional volume."
             alert_icon = "🔥"
             send_sms_alert = True
         elif oi_surge_detected and current_close <= current_ema:
-            action_advice = "⚡ WATCH CLOSELY: Paper price is suppressed, but massive hidden options buying signals a breakout."
+            action_advice = "⚡ WATCH CLOSELY: Subsurface options breakout pending."
             alert_icon = "⚡"
             send_sms_alert = True
         else:
-            action_advice = "⏳ WAIT: Consolidation active. Sideways price macro."
+            action_advice = "⏳ WAIT: Consolidation active. Sideways micro structures."
             alert_icon = "⏳"
 
-        # --- 6. TEXT REPORT LAYOUT & NOTEPAD EXPORTER ---
+        # --- TEXT REPORT LAYOUT & EXPORTER ---
         td3c_delta_str = "Calculating (Needs historical day baseline)"
         td20_delta_str = "Calculating (Needs historical day baseline)"
         
+        # Default text formatting for phone
+        sms_freight_movement = f"TD3C: {td3c_lots} | TD20: {td20_lots}"
+
         try:
             if os.path.isfile(csv_file_path):
                 history_df = pd.read_csv(csv_file_path, on_bad_lines='skip')
@@ -304,6 +334,9 @@ def complete_production_bwet_system():
                         last_entry = valid_history.iloc[-1]
                         prev_td3c_val = float(last_entry['TD3C_Lots'])
                         prev_td20_val = float(last_entry['TD20_Lots'])
+
+                        td3c_pct = 0.0
+                        td20_pct = 0.0
                         
                         if prev_td3c_val > 0:
                             td3c_pct = ((td3c_lots - prev_td3c_val) / prev_td3c_val) * 100
@@ -311,10 +344,14 @@ def complete_production_bwet_system():
                         if prev_td20_val > 0:
                             td20_pct = ((td20_lots - prev_td20_val) / prev_td20_val) * 100
                             td20_delta_str = f"{td20_lots - prev_td20_val:+.0f} Lots ({td20_pct:+.1f}%)"
+
+                        #ADDED: Expressed as percentage string for text
+                        sms_freight_movement = f"TD3C: {td3c_pct:+.1f}% | TD20: {td20_pct:+.1f}%"      
+
         except Exception as delta_error:
             td3c_delta_str = f"Delta calculation bypassed: {str(delta_error)[:25]}"
 
-        # Print output directly to the terminal console layout
+        # --- STEP 3: EXPORT DETAILED PRE-MARKET LAYOUT ---
         print(f"\n=================================================================")
         print(f"[MONITOR] {ticker_symbol} LIVE MONITOR SYSTEM")
         print(f"=================================================================")
@@ -338,7 +375,7 @@ def complete_production_bwet_system():
         print(f"ACTION ADVICE:        {action_advice}")
         print("=================================================================")
 
-        # Mirror and write out the exact layout directly to a readable desktop notepad text file
+        # Mirror and write out the exact layout directly to a readable text file
         report_file_path = os.path.expanduser("~/bwet_log.txt")
         with open(report_file_path, "a", encoding="utf-8") as f:
             f.write(f"=================================================================\n")
@@ -367,7 +404,7 @@ def complete_production_bwet_system():
         print("📄 Readable desktop report mirrored to ~/bwet_log.txt")
 
         
-        # --- 7. AUTOMATIC SPREADSHEET LOGGER ---
+        # --- AUTOMATIC SPREADSHEET LOGGER ---
         log_data = {
             "Timestamp": [current_time.strftime('%Y-%m-%d %H:%M:%S')],
             "Price": [current_close],
@@ -389,20 +426,18 @@ def complete_production_bwet_system():
             log_df.to_csv(csv_file_path, mode='a', header=False, index=False)
             print("💾 Metrics successfully appended to tracking ledger history.")
 
-        # --- 8. BOOST (TMobile) MOBILE GATEWAY ---
+        # --- BOOST (TMobile) MOBILE GATEWAY ---
         if send_sms_alert:
             try:
-                import smtplib
-                from email.mime.text import MIMEText
-                
                 sender_email = os.getenv("GMAIL_SENDER_EMAIL")
                 sender_password = os.getenv("GMAIL_APP_PASSWORD") 
                 target_boost_phone = os.getenv("TARGET_BOOST_PHONE")
 
                 if not all([sender_email, sender_password, target_boost_phone]):
                     raise ValueError("Missing critical communication credentials in .env file.") 
-                
-                text_message = f"{alert_icon} {ticker_symbol} Alert!\nPrice: ${current_close:.2f}\nAction: {action_advice[:28]}\nCore: {holdings_text}"
+               
+                clean_action = action_advice.lower().split(':')[0].strip()
+                text_message = f"bwet alert at ${current_close:.2f}. status {clean_action} shipping changes at {sms_freight_movement.lower()}"
                 msg = MIMEText(text_message)
                 msg["From"] = sender_email
                 msg["To"] = target_boost_phone
@@ -418,7 +453,7 @@ def complete_production_bwet_system():
             except Exception as gateway_error:
                 print(f"⚠️ Boost Mobile Gateway Failed: {gateway_error}")
 
-        # --- 9. INSULATED DESKTOP ROUTING ---
+        # --- 9. DESKTOP ALERTS ---
         clean_text_flag = str(action_advice).replace(":", "")
         sys_uid = str(os.getuid())
         environment_path_string = "DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" + sys_uid + "/bus"
@@ -431,70 +466,46 @@ def complete_production_bwet_system():
         print(f"Processing Error: {error_details}")
         return False, str(error_details)
 
-# --- SMART DAEMON CONTROLLER LOOP (UPGRADED FOR SEVEN DAYS & EXTENDED HOURS) ---
+# --- RE-ENGINEERED OPEN & CLOSE PRECISION TARGET DAEMON LOOP ---
 if __name__ == "__main__":
-    import argparse
-    import sys
-    import datetime
-    import time
-
-    parser = argparse.ArgumentParser(description="BWET Freight Futures Monitoring Daemon")
-    parser.add_argument("--test", action="store_true", help="Force an immediate diagnostic evaluation run and exit.")
-    args = parser.parse_args()
-
     if args.test:
         print("🛠️  TEST MODE ACTIVATED: Forcing an immediate diagnostic evaluation run...")
         fresh_release_confirmed, status_msg = complete_production_bwet_system()
         print(f"\nDiagnostic Complete. Status: {status_msg} (Fresh Data: {fresh_release_confirmed})")
         sys.exit(0)
 
-    print("🚀 BWET 7-Day Extended Hours Monitoring Daemon Initialized.")
-    morning_captured_today = False
-    afternoon_captured_today = False
-    last_checked_day = None
+    print("🚀 BWET Precision Chronometer Daemon Initialized.")
+    print("🎯 Target Matrix Scheduled: 08:25 AM CST (Open) & 03:00 PM CST (Close) Daily.")
+    
+    last_open_date = None
+    last_close_date = None
 
     while True:
         now = datetime.datetime.now()
-        current_day = now.date()
+        current_date = now.date()
         
-        # Reset daily trackers upon crossing the midnight boundary
-        if current_day != last_checked_day:
-            morning_captured_today = False
-            afternoon_captured_today = False
-            last_checked_day = current_day
-
-        # Morning Window: 07:00 CST to 08:30 CST
-        is_pre_market = (7 <= now.hour <= 8 and not (now.hour == 8 and now.minute > 30))
-        
-        # Afternoon Window: EXACTLY 15:30 CST to 16:00 CST (3:30 PM - 4:00 PM)
-        is_after_hours = (now.hour == 15 and now.minute >= 30)
-
-        if is_pre_market or is_after_hours:
-            # Silent holding gate if morning target was already achieved
-            if is_pre_market and morning_captured_today:
-                time.sleep(300)
-                continue
-                
-            # Silent holding gate if afternoon target was already achieved
-            if is_after_hours and afternoon_captured_today:
-                time.sleep(300)
-                continue
-                
-            print(f"\n⏰ Dynamic Market Window Active ({now.strftime('%H:%M:%S')} CST). Initiating scan cycle...")
-            fresh_release_confirmed, status_msg = complete_production_bwet_system()
+        # 1. MORNING OPENING WINDOW: Exactly 08:25 AM CST
+        if now.hour == 8 and now.minute == 25 and current_date != last_open_date:
+            print(f"\n⏰ Opening Chronometer Match at {now.strftime('%H:%M:%S')} CST. Executing daily opening run...")
             
-            # Secure Lockdown State Gates per individual tracking window
-            if is_pre_market and fresh_release_confirmed:
-                print("🎯 MORNING LOCKDOWN CONFIRMED: Today's fresh batch captured. Standby until next window...")
-                morning_captured_today = True
+            success, status = complete_production_bwet_system()
+            if success:
+                last_open_date = current_date
+                print(f"🎯 OPEN SUMMARY LOCKED IN FOR {current_date}. Waiting for close...")
             
-            if is_after_hours:
-                print("🎯 AFTER-HOURS CAPTURE CONFIRMED: Tracking pass complete. Locking down window...")
-                afternoon_captured_today = True
-            
-            print("⏳ Scan cycle complete. Enforcing 10-minute stabilization delay...")
-            time.sleep(600)
+            time.sleep(65)
             continue
             
-        # Passive deep-sleep state (15 minutes) when outside any active market window barriers
-        time.sleep(900)
+        # 2. EVENING CLOSING WINDOW: Exactly 03:00 PM CST
+        if now.hour == 15 and now.minute == 0 and current_date != last_close_date:
+            print(f"\n⏰ Closing Chronometer Match at {now.strftime('%H:%M:%S')} CST. Executing daily closing run...")
+            
+            success, status = complete_production_bwet_system()
+            if success:
+                last_close_date = current_date
+                print(f"🎯 CLOSE SUMMARY LOCKED IN FOR {current_date}. Waiting for tomorrow's open...")
+                
+            time.sleep(65)
+            continue
+            
+        time.sleep(20)
